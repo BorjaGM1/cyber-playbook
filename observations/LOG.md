@@ -1,0 +1,78 @@
+# Observations Log (Newest First)
+
+Empirical findings, benchmark measurements, supply-chain post-mortems, and architecture lessons distilled for general security engineering. Every entry is dated, sourced, and free of private project references.
+
+---
+
+## 2026-10-23 (Baseline: 2024–2026 Offensive/Defensive AI Research & Production Engineering Lessons)
+
+### 1. Three-Arm Patch Proofs, Regression Hunting & `/goal` Architecture (`Trail of Bits` + `OpenAI`, July–October 2026)
+- **Sources:**
+  - Trail of Bits, [*"Your AI agent fixed the bug, but what else did it change?"*](https://blog.trailofbits.com/2026/10/21/your-ai-agent-fixed-the-bug-but-what-else-did-it-change/) (2026-10-21).
+  - Trail of Bits, [*"How we use `/goal` to find bugs in Patch the Planet"*](https://blog.trailofbits.com/2026/07/28/how-we-use-goal-to-find-bugs-in-patch-the-planet/) (2026-07-28).
+  - Trail of Bits, [*"Field reports from Patch the Planet"*](https://blog.trailofbits.com/2026/07/02/field-reports-from-patch-the-planet/) (2026-07-02).
+- **Findings:**
+  - **21 Regressions in 130+ Merged AI Security Patches (2026-10-21):** Auditing 130+ AI-generated security patches that had already been merged into open-source projects revealed that **21 patches (~16%) introduced behavioral regressions**. Trail of Bits solved this with two open-source skills:
+    1. **`patching-bugs` (The Three-Arm Proof + Invariant-Guided Repair):** Requires every candidate patch to pass three live executions in the exact same build environment—**(a) unpatched baseline fails PoC**, **(b) patched build passes PoC**, and **(c) reverting the patch in that same build environment fails the PoC again**—while documenting the structural invariant restored per `THREAT_MODEL.md` and `PATCHING_GUIDELINES.md`.
+    2. **`regression-hunt`:** A fresh-context agent traces the patch `diff` outward to public interfaces, replays live regression hypotheses, and passes candidates through an independent adjudication agent against `THREAT_MODEL.md` and `PATCHING_GUIDELINES.md`, **reducing false-positive regression alerts by 25%**.
+  - **Autonomous Dynamic Fuzz Lab Construction (`zlib` & `curl`, July 2026):** On `zlib`, the `/goal` agent recognized that static code reading had low expected value on a decade-fuzzed codebase and **autonomously built a custom fuzzing lab in <24 hours**, fuzzing non-default compile-time variants (`INFLATE_STRICT`, `BUILDFIXED`, `PKZIP_BUG_WORKAROUND`) and injecting simulated OS write backpressure (`EAGAIN`/short writes) into `gz*` streaming state transitions. On `curl`, comparing `curl-7_51_0` vs. `HEAD` uncovered bugs in HSTS parsing, cookies, and SASL negotiation.
+  - **The 3 Rules of `/goal` & `agentcov`:**
+    1. Have the agent write its own `/goal` prompt from `THREAT_MODEL.md` and self-red-team it for lazy shortcuts; track actual lines read via **`agentcov`** because agents otherwise rationalize skipping unvisited files.
+    2. Calibrate variant-search width to a **one-sentence description of the risk class** (which found **9 real bugs in `rust-lang/rust`**, including a compiler soundness hole patched in **Rust 1.98**, and **2 Keycloak SAML privilege escalations**, whereas passing full historical stack traces found **0 bugs**); treat `"no bugs found"` as an intermediate state.
+    3. Assign strictly **one outcome per agent** (1 discovery agent maps top 5 surfaces $\to$ 5 dedicated single-outcome surface agents + 1 unconstrained roamer) and filter every finding through a **Two-Pass Cross-Model Judge Gauntlet** (Judge 1 checks `THREAT_MODEL.md` risk; Judge 2—a *different model family*—demands a reproducible PoC).
+- **Playbook integration:** Codified in [`2-discovery-and-attacker-methods/autonomous-micro-agent-red-teaming.md`](../2-discovery-and-attacker-methods/autonomous-micro-agent-red-teaming.md), [`2-discovery-and-attacker-methods/stateful-property-and-fuzzing-harnesses.md`](../2-discovery-and-attacker-methods/stateful-property-and-fuzzing-harnesses.md), and [`baselines/pre-deploy-security-pipeline.md`](../baselines/pre-deploy-security-pipeline.md).
+
+### 2. Attack Surface Reduction (ASR) & Config Interactions (`Anthropic Frontier Red Team`, 2026-10-20)
+- **Source:** Chris Rohlf, [*"Using Claude to reduce the attack surface of code"*](https://www.anthropic.com/research/attack-surface-reduction) (2026-10-20).
+- **Finding:** Auditing **25 open-source projects** (`>5M LOC`, `17,000+` config options, `3,842` security-relevant) with a 3-pass fresh-context skill (Pass 1: Default Reachability; Pass 2: Pre-Gate/Pre-Auth Reachability; Pass 3: Config Interactions) uncovered **493 issues**:
+  - Across the 11 gated projects: **93 unnecessary pre-auth surfaces** in default config, **37 pre-auth execution/state-recording paths**, and **61 config combinations** weakening pre-auth controls.
+  - Across all 25 projects: **162 dangerous configuration interactions** accepted without error (**94 silently disabled a security control**, **68 caused runtime inconsistencies**). Notably, **4 unrelated projects** shared the exact same fail-open bug: hostname/wildcard deny-list rules (`*.evil.com`) silently failed open when reverse-DNS lookup was disabled because raw IP strings never matched hostname patterns.
+  - **OpenSSH `10.4` $\to$ `10.6` lesson:** `OpenSSH 10.4` exposed ~4,500 LOC (**~16%–20% of its pre-auth surface**) of disabled post-quantum `ML-DSA-44` code to unauthenticated callers because `sshd` deserialized key blobs and verified embedded certificate CA signatures *before* checking `PubkeyAcceptedAlgorithms`. `OpenSSH 10.5` checked the outer packet algorithm header while dispatching the parser on the inner blob type string. Moving the allowlist gate inside the parser before deserialization (`OpenSSH 10.6`) removed ~20% of pre-auth reachability.
+- **Playbook integration:** Codified in [`2-discovery-and-attacker-methods/attack-surface-and-config-interaction-audit.md`](../2-discovery-and-attacker-methods/attack-surface-and-config-interaction-audit.md).
+
+### 3. High-Precision Autonomous Vulnerability Discovery (`Anthropic OSS Scanner / Project Glasswing` & `ExploitGym`, May–Oct 2026)
+- **Sources:**
+  - Anthropic Frontier Red Team, [*"Launching an opt-in vulnerability-finding service for open-source software"*](https://www.anthropic.com/research/launching-opt-in-vuln-finding-service-for-open-source) (2026-10-08).
+  - Anthropic, [*"Project Glasswing initial update"*](https://www.anthropic.com/research/glasswing-initial-update) (2026).
+  - Anthropic, [*"Evaluating exploit generation (`ExploitGym`)"*](https://www.anthropic.com/research/exploit-evals) (May 2026).
+- **Finding:**
+  - On UC Berkeley's `CyberGym` benchmark, LLMs progressed from finding **<20% of vulnerabilities at the start of 2025 to >85% in 2026**.
+  - On `ExploitGym` (898 vulnerability tasks, May 2026), `Claude Mythos Preview` generated **157/898 full working exploits** and `GPT-5.5` (via Codex CLI) generated **120/898**.
+  - Across **1,000+ open-source repositories** scanned in Project Glasswing, `Claude Mythos Preview` achieved a **90.6% true-positive rate** (**1,587 of 1,752 independently audited findings**).
+  - In a deep expert pentester audit of **97 critical/high-severity reports** spanning 48 projects, **85 (88%) met the coordinated vulnerability disclosure (CVD) bar**, **11 were real bugs (duplicates)**, and **only 1 of 97 (~1%) was a false positive** (**96/97 = 99% real bugs**). In `wolfSSL`, **72 of 74 raw model reports were valid** (5 became CVEs). Maintainers of `PostgreSQL`, `OpenSSL`, `HotCRP`, and `curl` confirmed that bundling **(1) an executable reproducer, (2) root-cause analysis + `git bisect` to the introducing commit, and (3) a candidate patch** eliminates the "CVE slop" problem.
+- **Playbook integration:** Codified as the 3-part reporting standard in [`baselines/pre-deploy-security-pipeline.md`](../baselines/pre-deploy-security-pipeline.md).
+
+### 4. Pipeline Architecture Beats Raw Model Checkpoint (`OpenAI Daybreak`, `NebuSec Benchmark` & `Context Studios`, Aug–Sep 2026)
+- **Sources:**
+  - OpenAI, [*"Expanding Daybreak as the cyber defense window narrows"*](https://openai.com/index/expanding-daybreak-as-the-cyber-defense-window-narrows/) (August 2026).
+  - NebuSec, [*"The Nebu Benchmark: Evaluating AI Security Scanners on Real-World Vulnerabilities"*](https://nebusec.ai/research/nebu-benchmark/) (2026-09-01).
+  - Context Studios, [*"Codex Security vs. Claude Code Security Review"*](https://www.contextstudios.ai/comparisons/codex-security-vs-claude-code-security-review) (July–September 2026).
+- **Finding:**
+  - Tested on **76 real ground-truth vulnerabilities**, the **exact same `GPT-5.4` model** detected **24%** in `Codex Security (Standard)` and **43%** in `Codex Security (Deep)`, whereas replacing only the multi-agent orchestration pipeline (`Nebu`) jumped detection to **80%** (and **88%** at maximum compute—a **$3.3\times$ gain** from pipeline architecture alone).
+  - In `Claude Security` (`Opus 5`), removing an internal cap that truncated reports at 45 findings increased true vulnerability coverage from **42% to 74%**.
+  - OpenAI `Codex Security` (`Blue`) introduced explicit **`coverage.json`** and **`scan-manifest.json`** outputs declaring which files and routes were *not* inspected so engineering teams never equate *"0 findings"* with *"100% coverage"*.
+- **Playbook integration:** Codified in [`2-discovery-and-attacker-methods/autonomous-micro-agent-red-teaming.md`](../2-discovery-and-attacker-methods/autonomous-micro-agent-red-teaming.md) and [`baselines/pre-deploy-security-pipeline.md`](../baselines/pre-deploy-security-pipeline.md).
+
+### 5. Vals AI Corporate Cyber Range Benchmark & Open-Weight vs. Abliterated Models (2026-10-20)
+- **Sources:** [@ValsAI benchmark (2026-10-20)](https://x.com/ValsAI/status/2112471082397778083); [@barckcode thread (2026-10-22)](https://x.com/barckcode/status/2113243485344010701); [DeepSeek V4.1 Flash 1017 release (2026-10-17)](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017); Young ([`arXiv:2512.13655v2`](https://arxiv.org/abs/2512.13655), Jan 2026); [`sipratt-p/refusal-ablation-eval`](https://github.com/sipratt-p/refusal-ablation-eval) (2026); [`chris544460/abliteration-experiments`](https://github.com/chris544460/abliteration-experiments) (2026).
+- **Finding:** In Vals AI's 21-objective corporate network range (up to 500M tokens), stock open-weight `DeepSeek V4.1 Flash 1017` scored **16.3 / 21**, ahead of `GPT-6 Sol Daybreak` (**15.7 / 21**) and `Grok 4.7` (**12.0 / 21**), while `Claude Opus 5.5` scored **1.0 / 21** due to mid-chain black-box safety refusal. However, empirical studies on weight abliteration (`arXiv:2406.11717` derivatives) show severe collateral damage to formal reasoning: up to **-18.81 pp (-26.5% relative) on `GSM8K`** (Young, Jan 2026), **-5.75% to -6.87% on `TruthfulQA`**, a collapse from **98/100 to 13/100** on recursive parser synthesis when `embed_tokens` is abliterated, and **3/12 (25%) agentic task derailments** on community-abliterated `DeepSeek-V4-Flash`.
+- **Lesson:** Never use community-abliterated weights for defensive security engineering. Use stock frontier models (`Claude`, `GPT`, `Grok`) and stock open-weight models (`DeepSeek V4.1 Flash 1017`, `GLM-5.3`) inside white-box localhost canary harnesses (`127.0.0.1`), where safety refusal rates are **0%** and reasoning stays intact. See [`2-discovery-and-attacker-methods/models-and-refusal-free-framing.md`](../2-discovery-and-attacker-methods/models-and-refusal-free-framing.md).
+
+### 6. October 2026 Software Supply-Chain Wave (`.pth` Hooks, Mutable Releases & Platform Secrets)
+- **Sources:** [LiteLLM Security Disclosure (2026-10-21)](https://docs.litellm.ai/blog/security-incident-oct-21-2026) & [OSV `MAL-2026-2144`](https://osv.dev/vulnerability/MAL-2026-2144); [Railway Security Disclosure (2026-10-21)](https://blog.railway.com/p/security-disclosure-wednesday-october-21st); [OVHcloud CLI Advisory `GHSA-862f-55f5-vmvw` (2026-10-19)](https://github.com/ovh/ovhcloud-cli/security/advisories/GHSA-862f-55f5-vmvw); [Rank Math PRO Incident (2026-10-15/16)](https://rankmath.com/kb/pro-3-0-123-security-incident/).
+- **Finding:** Four major supply-chain incidents within 6 days shared one mechanism: attackers used compromised publishing credentials (including tokens leaked in LLM proxy logs) to push malware through official channels without touching source-code git tags:
+  - `litellm==1.107.0` placed `cook.pth` into Python `site-packages`, executing automatically on every Python invocation even when install scripts were disabled, and pushed backdoored `latest`/`main-stable` Docker tags.
+  - `ovhcloud-cli` (`v0.11.0`–`v0.15.0`) had official GitHub release binaries overwritten because release immutability was off; a downstream user pinning `SHA-256` in CI caught the tampering in ~94 minutes.
+- **Playbook integration:** Codified in [`1-known-vulnerabilities/infra-and-supply-chain/dependency-and-ci-supply-chain.md`](../1-known-vulnerabilities/infra-and-supply-chain/dependency-and-ci-supply-chain.md).
+
+### 7. Why Explicit Application-Layer Capability Scoping Beats Database RLS
+- **Field Lesson:** Relying on PostgreSQL Row-Level Security (RLS) as a primary tenant isolation mechanism repeatedly fails in fast-moving engineering teams: new tables default to RLS off (failing open silently when a migration forgets `ENABLE` + `FORCE ROW LEVEL SECURITY`), access logic is invisible during application code review, transaction poolers (`PgBouncer`/Supavisor) risk session-variable bleed if `SET LOCAL` is misused, and non-Postgres stores (SQLite, D1, S3/R2, FTS indexes) receive zero protection.
+- **Playbook Rule:** Enforce explicit application-layer capability scoping (`TenantScope` + `ScopedDb`) paired with external Cross-Tenant Canary and Differential Surface Oracles. See [`1-known-vulnerabilities/authorization-and-tenancy/cross-tenant-idor-and-explicit-scoping.md`](../1-known-vulnerabilities/authorization-and-tenancy/cross-tenant-idor-and-explicit-scoping.md).
+
+### 8. Scoped Micro-Harnesses & Specialized Debugger Tools (`Project Naptime`, `Big Sleep`, `BountyBench`, `XBOW`, `AIxCC`, `OSS-Fuzz-Gen`)
+- **Sources:** Google Project Zero & DeepMind — *Project Naptime* (June 2024) & *Big Sleep* (Nov 2024 & Summer 2025, `CVE-2025-6965`); BountyBench ([`arXiv:2505.15216`](https://arxiv.org/abs/2505.15216), NeurIPS 2025); DARPA AIxCC / OSS-CRS ([`arXiv:2603.08566`](https://arxiv.org/abs/2603.08566), March 2026); Google OSS-Fuzz-Gen & `FalseCrashReducer` ([`arXiv:2510.02185`](https://arxiv.org/abs/2510.02185), July 2026).
+- **Finding:**
+  - **Google Project Zero *Project Naptime* & *Big Sleep*:** Equipping the agent with four minimal, specialized tools (`Code Browser` + sandboxed Python script generator + `Debugger` with ASan breakpoints + `Reporter` gate) enabled the discovery of a pre-release `SQLite` stack buffer underflow (Oct 2024) and pre-empted the in-the-wild `SQLite` integer truncation vulnerability `CVE-2025-6965` (Summer 2025).
+  - **BountyBench:** Open-ended vulnerability detection (`Detect`) succeeded only **12.5%**, whereas scoping the agent to a concrete locus and exploit hypothesis (`Exploit`) succeeded **67.5%** ($5.4\times$ improvement).
+  - **Google `OSS-Fuzz-Gen`:** Across 15,204 fuzz-target runs, fuzzing internal helpers without enforcing entry-point preconditions caused massive false-positive crashes; enforcing entry-point constraints (`FalseCrashReducer`) achieved **96.2%–96.9% precision**.
+- **Playbook integration:** Codified in [`2-discovery-and-attacker-methods/`](../2-discovery-and-attacker-methods/README.md).
