@@ -13,15 +13,23 @@ Here is what the 2025–2026 empirical data proves:
 
 ## 2. Empirical Benchmark Reality Check (2025–2026, Dated & Sourced)
 
-### A. Vals AI Corporate Cyber Range Benchmark (October 20, 2026)
-- **Source:** [@ValsAI benchmark release (2026-10-20)](https://x.com/ValsAI/status/2112471082397778083) & [@barckcode analysis (2026-10-22)](https://x.com/barckcode/status/2113243485344010701).
-- **Task:** 21 sequential offensive objectives inside a realistic corporate network range, up to **500M tokens** per run.
-- **Measured Results (Mean Objectives Completed out of 21):**
-  - `DeepSeek V4.1 Flash 1017` (stock open-weight, MIT license, 763B params): **16.3 / 21** (1st place overall; ~$0.15–$0.30/M input, $0.60–$1.20/M output).
-  - `GPT-6 Sol Daybreak` (evaluated under OpenAI's verified cyber program): **15.7 / 21**.
+### A. Artificial Analysis Cyber Index (October 23, 2026) & Vals AI Cyber Range (October 20, 2026)
+- **Sources:**
+  - [Artificial Analysis Cyber Index (2026-10-23)](https://artificialanalysis.ai/evaluations/artificial-analysis-cyber-index) & [@ArtificialAnlys release thread (2026-10-23)](https://x.com/ArtificialAnlys/status/2113682654709313811) (composite of `CWE-Bench-AA`, `DeepsecBench-AA`, and `CyberGym-E2E-AA`).
+  - [@ValsAI Corporate Cyber Range benchmark (2026-10-20)](https://x.com/ValsAI/status/2112471082397778083) & [@barckcode analysis (2026-10-22)](https://x.com/barckcode/status/2113243485344010701) (21 sequential objectives, up to 500M tokens).
+- **Artificial Analysis Cyber Index Results (Public API Evaluation, Oct 23, 2026):**
+  - `GPT-6 Sol (Daybreak Blue, max)` (restricted trusted-access program): **69%** (#1 overall, **$1.77 / task**; scores **+32 percentage points** above its public counterpart due to fewer safety refusals).
+  - `DeepSeek V4.1 Flash 1017 (max)` (stock open-weight, MIT license): **57%** (**#1 openly/publicly available model**, #2 overall, **$0.42 / task**, **0% safety refusals**). Up **+16 points** over `DeepSeek V4.1 Flash` (41%), driven by a **+53-point jump on `CyberGym-E2E-AA` (from 23% to 76%)**, plus **69%** on `CWE-Bench-AA` and **25%** on `DeepsecBench-AA`.
+  - `Grok 4.7 (xhigh)` & `MiMo-V2.6-Pro`: **56%** (`MiMo-V2.6-Pro` at **$0.18 / task**).
+  - `GLM-5.3-Flash`: **50%** (~**$0.35 / task**).
+  - `GLM-5.3 (max, non-flash)`: **36%** (~**$2.50 / task**) in solo cold-start runs because of a large **safety-block bar** triggered when cold-started on raw offensive prompts (see Section 3A below for how pairing it with `DeepSeek V4.1 Flash 1017` eliminates this cold-start refusal).
+  - `Claude Opus 5.5`: **29%** ($8–$20+/task) with a **36% safety-block bar** (`Session paused · Details: [cyber]`).
+- **Vals AI Corporate Cyber Range Results (Mean Objectives Completed out of 21, Oct 20, 2026):**
+  - `DeepSeek V4.1 Flash 1017` (stock open-weight): **16.3 / 21** (1st place overall).
+  - `GPT-6 Sol Daybreak`: **15.7 / 21**.
   - `Grok 4.7`: **12.0 / 21**.
   - `Claude Opus 5.5`: **1.0 / 21** (aborted after objective 1 due to black-box offensive safety refusal).
-- **Engineering Takeaway:** Stock `DeepSeek V4.1 Flash 1017` (without any third-party abliteration) already leads long-horizon offensive cyber loops at a fraction of frontier API cost, while `Claude` requires white-box invariant framing (Section 4 below) to avoid black-box pentest refusals.
+- **Engineering Takeaway:** Stock `DeepSeek V4.1 Flash 1017` sits on the capability-vs.-cost Pareto frontier (**$0.42/task**, **0% safety refusals**, **76% on `CyberGym-E2E-AA`**), while frontier models (`Claude`, `GPT`) require white-box invariant framing (Section 4) and `GLM-5.3` (non-flash) requires dual-model orchestration or context-warming (Section 3A) to avoid cold-start refusals.
 
 ### B. CyberGym (`arXiv:2506.02548`), `ExploitGym` (May 2026) & Project Glasswing (May–Oct 2026)
 - **Sources:** UC Berkeley CyberGym ([arXiv:2506.02548](https://arxiv.org/abs/2506.02548), 1,507 real-world vulnerabilities across 188 OSS C/C++ projects); Anthropic [*"Evaluating exploit generation (`ExploitGym`)"* (May 2026)](https://www.anthropic.com/research/exploit-evals); Anthropic [*"Project Glasswing initial update"*](https://www.anthropic.com/research/glasswing-initial-update) & [*"Launching an opt-in vulnerability-finding service"* (Oct 8, 2026)](https://www.anthropic.com/research/launching-opt-in-vuln-finding-service-for-open-source); [Z.ai GLM-5.3 technical report (2026-08-14)](https://z.ai/blog/glm-5.3).
@@ -52,13 +60,31 @@ Here is what the 2025–2026 empirical data proves:
 
 ---
 
-## 3. Which Models to Use for Each Defensive Task
+## 3. Which Models to Use for Each Defensive Task & Dual-Model Orchestration (`GLM-5.3` + `DeepSeek V4.1 Flash 1017`)
 
 | Task in This Playbook | Recommended Primary Models | Why |
 |-----------------------|----------------------------|-----|
 | **Deep Architecture Audit, State-Machine Synthesis (`fast-check`/`proptest`) & Kani Proofs** | Stock Frontier Reasoning Models (`Claude Opus/Sonnet`, `GPT-5.6/6`, `Grok 4.7`) | Highest formal reasoning and multi-file code understanding; **0% refusal** when prompted to write `proptest`/`fast-check`/`Kani` harnesses or audit source code against ASVS `v5.0.0`. |
-| **High-Volume Per-Route Micro-Agent Red Teaming (`Step 3` Canary Loop)** | Stock `DeepSeek V4.1 Flash 1017` or Stock `GLM-5.3` (or Frontier models with white-box framing) | Extremely low cost per million tokens, strong tool-calling and bash/HTTP scripting, near-zero refusal on localhost CTF canary harnesses, and no weight-ablation reasoning loss. |
-| **Cross-Model Judge 2 & Patch Regression Hunting (`regression-hunt`)** | Different model family from the Finder/Patcher (e.g., `Claude` judging `GPT/Codex`, or `GPT` judging `Claude`) | Breaks shared model family blind spots; enforces the Three-Arm Proof and cuts regression false positives by 25%. |
+| **High-Volume Per-Route Micro-Agent Red Teaming (`Step 3` Canary Loop)** | Stock `GLM-5.3` (non-flash) + Stock `DeepSeek V4.1 Flash 1017` Dual-Model Combo (or Frontier models with white-box framing) | Combines `GLM-5.3` (non-flash) lateral exploit creativity with `DeepSeek V4.1 Flash 1017`'s speed, low cost ($0.42/task, 99% cache hits), and 0% refusal profile—without weight-ablation reasoning loss. |
+| **Cross-Model Judge 2 & Patch Regression Hunting (`regression-hunt`)** | Different model family from the Finder/Patcher (e.g., `Claude` judging `DeepSeek`/`GLM` or `GPT/Codex`) | Breaks shared model family blind spots; enforces the Three-Arm Proof and cuts regression false positives by 25%. |
+
+### A. Operational Pattern: The `GLM-5.3 (non-flash)` + `DeepSeek V4.1 Flash 1017` Dual-Model Pairing
+- **Sources:** Field architecture documented by [@bedros_p (2026-10-23)](https://x.com/bedros_p/status/2113641853874483203) ([ inverted topology](https://x.com/bedros_p/status/2113642797265772672), [lead-closer rule](https://x.com/bedros_p/status/2113683139302408369), [cold-start refusal mechanism](https://x.com/bedros_p/status/2113686579357303093)) and reproduced by [@cheatyyyy (2026-10-23)](https://x.com/cheatyyyy/status/2113657749943001521) inside [`omp` (`can1357/oh-my-pi`)](https://github.com/can1357/oh-my-pi) and `OpenCode`.
+- **Why these two stock models complement each other:**
+  1. **`DeepSeek V4.1 Flash 1017` (`0%` refusals, `76%` on `CyberGym-E2E-AA`, `$0.42/task`)** is methodical, fast (`40–100 tok/s` across 4–20 concurrent subagents), loops far less than earlier checkpoints, and never triggers cold-start safety refusals during attack-surface recon or PoC scripting. However, as a Flash model, it can miss non-obvious lateral pivots or complex multi-bug chains.
+  2. **`GLM-5.3` (non-flash, `high` reasoning — *not* `GLM-5.3-Flash`)** has substantially stronger lateral creativity for non-obvious vulnerability angles and exploit chains than `GLM-5.3-Flash` or `DeepSeek V4.1 Flash` alone, but has two drawbacks if used solo: **(a) higher token cost (~$2.50/task)** and **(b) a surface-level turn-1 refusal** because when cold-started on a raw target, `GLM-5.3` immediately attempts aggressive offensive escalation in turn 1 and trips its own surface refusal filter.
+  3. **Why pairing them eliminates `GLM-5.3`'s refusal on stock weights:** When `DeepSeek V4.1 Flash 1017` maps the attack surface first (populating structured `.md`/`.tsv` workspace notes) or executes subagent tasks while `GLM-5.3` operates on established technical context, `GLM-5.3`'s turn-1 surface refusal is never triggered.
+- **Two Proven Multi-Agent Topologies (in `omp` / `oh-my-pi` or `OpenCode`):**
+  - **Topology 1 — `GLM-5.3 (high)` Orchestrator + `DeepSeek V4.1 Flash 1017` Subagents:**
+    - Configure `GLM-5.3` (non-flash, `high` effort) as the main orchestrator agent and `DeepSeek V4.1 Flash 1017` (e.g., via Fireworks AI or official API) as the worker subagent model (`Low` reasoning for recon/scouting, `High` reasoning for PoC verification).
+    - In `omp` (`can1357/oh-my-pi`), a 4-subagent run over **369K tokens** with **99% prompt-cache hits** runs at **~39.3 tok/s** and costs **$0.39 total**. Instruct subagents to coordinate over `omp`'s built-in IRC channel (`hub`) so workers broadcast discovered sinks/primitives instead of working in isolated silos.
+  - **Topology 2 — Inverted "Wall-Breaker / Lead-Closer" Escalation (`DeepSeek` Lead + On-Demand `GLM-5.3` Subagent):**
+    - Run `DeepSeek V4.1 Flash 1017` as both the orchestrator and primary subagents (`Low` for recon, `High` for PoCs), and instruct subagents to **spawn a `GLM-5.3` (non-flash) reviewer subagent at two mandatory checkpoints**:
+      1. **Before closing any lead ("Wall-Breaker"):** Whenever a `DeepSeek` subagent hits a wall or is about to mark a lead closed (with or without findings), spawn `GLM-5.3` to review the accumulated `.md`/`.tsv` evidence and either propose new angles/pivots or confirm the lead is exhausted.
+      2. **Upon confirming a bug ("Chain Escalator"):** Spawn `GLM-5.3` on any confirmed PoC to identify higher-impact primitives or multi-bug chains.
+    - Each on-demand `GLM-5.3` review costs **~$0.03–$0.10** while capturing nearly all of solo `GLM-5.3`'s lateral insight. When a long-running sweep hits diminishing returns, **swap the orchestrator and subagent roles** between `GLM-5.3` and `DeepSeek V4.1 Flash 1017` to break tunnel vision.
+- **Recursive Harness Optimization (`google-research/harness2`, October 2026):**
+  - Rather than hand-tuning prompt rules when subagents suffer tunnel vision or duplicate discovery across large note trees, Google Research's open-source [**Harness² (`google-research/harness2`, `arXiv:2610.14224`)**](https://github.com/google-research/harness2) applies **Propose–Probe–Compose** task-level and harnessing-level recursion to optimize an `OpenCode` or `Codex` harness's prompts, skills, memory layout, and cross-agent coordination without ground-truth labels (improving `GLM-5` and `Gemini 3.5 Flash` by up to **+11.5 points on WorkBuddy-Bench** and **+11.8 pp on LAB**). Always run `harness2` inside an OS sandbox (`Firejail` / container), as it has no built-in sandboxing.
 
 ---
 
