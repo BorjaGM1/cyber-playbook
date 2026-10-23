@@ -1,36 +1,50 @@
 # Dev Auth Bypasses, Loopback Host Parsing Traps & Fail-Closed Boot Assertions
 
-## 1. Invariant Violated & Mechanism
-
-- **Invariant Violated:** `I5 — Minimal Blast Radius & Fail-Closed Boot` and `I1 — Authentic Identity & Purpose Binding` (OWASP ASVS `v5.0.0-6.3.2`, `13.4.1`).
-- **Mechanism:** Applications frequently include local-development ergonomics—such as an environment variable (`DEV_AUTH_BYPASS=1`, `DEV_USER_EMAIL=dev@example.com`, `ALLOW_INSECURE_DEV_LOGIN=true`) or a hostname check (`isLocalhost(req)`)—so developers and local test runners can exercise routes without setting up external OIDC or Cloudflare Access. Three catastrophic failure modes turn these helpers into unauthenticated production takeovers:
-  1. **Silent Production Activation:** Someone copies `.env.example` into production/staging or deploys without setting `NODE_ENV=production`, leaving the dev-bypass path active on the public internet.
-  2. **Loopback Host Parsing Traps (`127.0.0.1.attacker.com` / `localhost.evil.com`):** A developer writes `url.hostname.startsWith("127.0.0.1")` or `req.headers.get("host")?.includes("localhost")` to restrict a dev-login endpoint to local development. An attacker sets a wildcard DNS `A` record for `127.0.0.1.attacker.com` (or sends `Host: 127.0.0.1.attacker.com` to the server), satisfies `.startsWith("127.0.0.1")`, and triggers the dev-bypass in production.
-  3. **Weak or Default Signing Secrets:** Falling back to `process.env.SESSION_SECRET ?? "dev-secret-change-me"` when an environment variable is accidentally omitted in production, allowing any attacker to forge HMAC session cookies offline.
+> **Invariants:** `I5 — Minimal Blast Radius & Fail-Closed Boot` and `I1 — Authentic Identity & Purpose Binding` (OWASP ASVS `v5.0.0-6.3.2`, `13.4.1`).
+> Related: [`surface-separation-and-destructive-gates.md`](surface-separation-and-destructive-gates.md) · [`../auth-and-sessions/jwt-and-edge-header-spoofing.md`](../auth-and-sessions/jwt-and-edge-header-spoofing.md) · [`../../2-discovery-and-attacker-methods/attack-surface-and-config-interaction-audit.md`](../../2-discovery-and-attacker-methods/attack-surface-and-config-interaction-audit.md)
 
 ---
 
-## 2. Where It Hides
+## 1. Attack Transcript
 
-- Auth middleware fallback branches (`if (env.DEV_USER_EMAIL) return { email: env.DEV_USER_EMAIL }`).
-- Seed / reset / test-impersonation routes (`/api/dev/login`, `/api/test/seed`, `/api/__test__/reset`) mounted unconditionally in the main router and guarded only by a runtime `Host` header check.
-- Config loaders (`src/config.ts`, `src/env.ts`) that provide hardcoded default strings for `JWT_SECRET`, `SESSION_SECRET`, `WEBHOOK_SECRET`, or `INTERNAL_API_KEY`.
-- Exposed `.git` or `.env` files in static asset directories or container build contexts (`ASVS v5.0.0-13.4.1`).
+```http
+GET /api/me HTTP/1.1
+Host: 127.0.0.1.attacker.example
+Connection: close
+
+HTTP/1.1 200 OK
+{"email":"dev@example.com","role":"owner"}
+```
+
+The attacker did not need DNS tricks at all. The `Host` header is chosen by the client:
+
+```http
+GET /api/me HTTP/1.1
+Host: localhost
+
+HTTP/1.1 200 OK
+{"email":"dev@example.com","role":"owner"}
+```
+
+And the forged-cookie variant, where a missing production secret fell back to a constant:
+
+```bash
+$ node -e 'const c=require("crypto");const d=Buffer.from(JSON.stringify({userId:"u_1",exp:9999999999})).toString("base64url");console.log(d+"."+c.createHmac("sha256","default-dev-secret-do-not-use").update(d).digest("base64url"))'
+eyJ1c2VySWQiOiJ1XzEiLCJleHAiOjk5OTk5OTk5OTl9.L0m...
+$ curl -H 'Cookie: session=eyJ1c2VySWQiOiJ1XzEiLCJleHAiOjk5OTk5OTk5OTl9.L0m...' https://app.example.com/api/me
+{"id":"u_1","role":"owner"}
+```
 
 ---
 
-## 3. Vulnerable vs. Hardened Pattern
+## 2. Spot the Bug
 
-### Vulnerable Pattern (TypeScript — `.startsWith("127.0.0.1")` Host Trap + Default Secret Fallback)
+Two snippets. Find at least four problems.
 
 ```typescript
-// VULNERABLE:
-// 1. Falls back to a known string if SESSION_SECRET is unset!
 export const SESSION_SECRET = process.env.SESSION_SECRET || "default-dev-secret-do-not-use";
 
-// 2. `hostname.startsWith("127.0.0.1")` matches `127.0.0.1.evil.com`!
-// 3. `DEV_BYPASS_EMAIL` is not rejected when running on a deployed server!
-export function getDevBypassUserVulnerable(req: Request, env: Record<string, string | undefined>) {
+export function getDevBypassUser(req: Request, env: Record<string, string | undefined>) {
   const url = new URL(req.url);
   const isLoopback =
     url.hostname.startsWith("127.0.0.1") ||
@@ -43,24 +57,7 @@ export function getDevBypassUserVulnerable(req: Request, env: Record<string, str
 }
 ```
 
-### Hardened Pattern (TypeScript & Rust — Exact Loopback Parser + Fail-Closed Boot Assertions)
-
 ```typescript
-const EXACT_LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
-
-/**
- * Exact hostname equality check after URL parsing (strips port, lowercases).
- * NEVER matches `127.0.0.1.evil.com` or `evil-localhost.com`.
- */
-export function isExactLoopbackHost(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    return EXACT_LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase());
-  } catch {
-    return false;
-  }
-}
-
 export interface ProductionEnvConfig {
   readonly APP_ENV: "development" | "test" | "production";
   readonly SESSION_SECRET: string;
@@ -69,46 +66,149 @@ export interface ProductionEnvConfig {
   readonly DEV_BYPASS_EMAIL?: string;
 }
 
-/**
- * Call synchronously at process/worker startup BEFORE binding any port or handling requests.
- * Fails closed (`throw`) if any production security invariant is violated.
- */
 export function assertSafeBootConfig(env: ProductionEnvConfig, requestUrl?: string): void {
   const isLocalOnly = requestUrl ? isExactLoopbackHost(requestUrl) : false;
   const isProd = env.APP_ENV === "production" || (requestUrl !== undefined && !isLocalOnly);
 
-  // 1. Require ≥32 bytes (256 bits) of entropy on SESSION_SECRET in all environments,
-  //    and reject known placeholder values:
-  if (
-    typeof env.SESSION_SECRET !== "string" ||
-    Buffer.byteLength(env.SESSION_SECRET, "utf8") < 32 ||
-    /default|change-me|secret|example|000000/i.test(env.SESSION_SECRET)
-  ) {
-    throw new Error("BOOT_ASSERTION_FAILED: SESSION_SECRET must be >= 32 high-entropy bytes");
+  if (Buffer.byteLength(env.SESSION_SECRET, "utf8") < 32) {
+    throw new Error("BOOT_ASSERTION_FAILED: SESSION_SECRET too short");
   }
-
-  // 2. If running in production (or serving any non-loopback host), forbid ALL dev bypass variables:
-  if (isProd) {
-    if (env.DEV_BYPASS_EMAIL) {
-      throw new Error(
-        "BOOT_ASSERTION_FAILED: DEV_BYPASS_EMAIL is set in a production or non-loopback environment!"
-      );
-    }
-    if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_POLICY_AUD) {
-      throw new Error(
-        "BOOT_ASSERTION_FAILED: Production environment requires ACCESS_TEAM_DOMAIN and ACCESS_POLICY_AUD"
-      );
-    }
+  if (isProd && env.DEV_BYPASS_EMAIL) {
+    throw new Error("BOOT_ASSERTION_FAILED: DEV_BYPASS_EMAIL set in production");
   }
 }
 ```
 
-### Hardened Pattern in Rust (Exact Loopback Hostname Check)
+---
+
+## 3. Invariant Violated & Mechanism
+
+Local ergonomics (`DEV_AUTH_BYPASS=1`, `DEV_USER_EMAIL`, an `isLocalhost(req)` helper) become unauthenticated production takeovers in five ways:
+
+1. **Silent production activation.** `.env.example` is copied to production, or the service is deployed without `APP_ENV=production`. Any guard that is *enabled by the flag whose absence is the failure* fails open. In the second snippet, `assertSafeBootConfig` is called at boot with no `requestUrl`, so `isProd` is true only if `APP_ENV === "production"`. An unset or misspelled `APP_ENV` (`prod`, `Production`) skips the dev-bypass check entirely.
+2. **Loopback host parsing traps.** `hostname.startsWith("127.0.0.1")` matches `127.0.0.1.attacker.example`; `includes("localhost")` matches `evil-localhost.com`.
+3. **The `Host` header is not a trust anchor at all.** Even an *exact* loopback check on `Host`, `X-Forwarded-Host` or `req.url` (usually derived from `Host`) is attacker-controlled: `Host: localhost` passes it. Exact parsing fixes the substring bug and leaves the real bug. The trustworthy facts are the **peer socket address** and the **interface the process is bound to**.
+4. **Reverse proxy on the same host.** If a proxy (nginx, a sidecar, a tunnel agent) terminates traffic and connects to the app over `127.0.0.1`, *every* internet request has a loopback peer. A peer-address check then also passes. Dev bypass must therefore be impossible when the process is reachable via any proxy.
+5. **Weak or default signing secrets.** `process.env.SESSION_SECRET ?? "dev-secret-change-me"` lets anyone forge session cookies offline.
+
+Why happy-path tests pass: they run locally, where everything is loopback and the secret fallback works.
+
+Where it hides: auth middleware fallback branches; `/api/dev/login`, `/api/test/seed`, `/api/__test__/reset` mounted unconditionally; config loaders with `.default()` on keys; exposed `.git` / `.env` (`ASVS v5.0.0-13.4.1`).
+
+---
+
+## 4. Hardened Pattern
+
+Principles: **default-deny** (anything that is not exactly `development` or `test` is production), **dev code is absent from production builds**, **peer and bind address are the anchors**, and **boot takes no request**.
+
+### 4.1 Environment resolution and boot assertion (TypeScript)
+
+```typescript
+export type AppEnv = "development" | "test" | "production";
+
+/** Unset, empty, misspelled or unknown values are treated as production. */
+export function resolveAppEnv(raw: string | undefined): AppEnv {
+  return raw === "development" || raw === "test" ? raw : "production";
+}
+
+export interface BootInputs {
+  readonly APP_ENV?: string;
+  readonly SESSION_SECRET?: string;
+  readonly ACCESS_TEAM_DOMAIN?: string;
+  readonly ACCESS_POLICY_AUD?: string;
+  readonly BIND_HOST?: string;     // interface the listener binds to
+  readonly TRUST_PROXY?: string;
+  readonly [key: string]: string | undefined;
+}
+
+const LOOPBACK_BIND = new Set(["127.0.0.1", "::1", "localhost"]);
+const PLACEHOLDER = /default|change-?me|example|placeholder|password|000000/i;
+
+function distinctChars(s: string): number {
+  return new Set(s).size;
+}
+
+/**
+ * Call synchronously at startup BEFORE binding a port. Takes no request, no URL.
+ * Returns the resolved env so callers cannot re-derive it differently.
+ */
+export function assertSafeBootConfig(env: BootInputs): AppEnv {
+  const appEnv = resolveAppEnv(env.APP_ENV);
+
+  // 1. Secret quality in every environment: length, placeholders, a crude entropy floor.
+  const secret = env.SESSION_SECRET;
+  if (
+    typeof secret !== "string" ||
+    Buffer.byteLength(secret, "utf8") < 32 ||
+    distinctChars(secret) < 12 ||
+    PLACEHOLDER.test(secret)
+  ) {
+    throw new Error("BOOT_ASSERTION_FAILED: SESSION_SECRET must be >= 32 bytes of generated randomness");
+  }
+
+  const devKeys = Object.keys(env).filter((k) => /^(DEV_|BYPASS_|SKIP_AUTH|MOCK_AUTH|ALLOW_INSECURE)/.test(k) && env[k]);
+
+  if (appEnv === "production") {
+    // 2. Production forbids every dev knob and requires the real identity configuration.
+    if (devKeys.length > 0) {
+      throw new Error(`BOOT_ASSERTION_FAILED: dev variables set in production: ${devKeys.join(", ")}`);
+    }
+    if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_POLICY_AUD) {
+      throw new Error("BOOT_ASSERTION_FAILED: production requires ACCESS_TEAM_DOMAIN and ACCESS_POLICY_AUD");
+    }
+  } else if (devKeys.length > 0) {
+    // 3. Dev bypass is allowed only when the listener cannot be reached off-box
+    //    and no proxy is configured that would make remote traffic look local.
+    if (!env.BIND_HOST || !LOOPBACK_BIND.has(env.BIND_HOST)) {
+      throw new Error("BOOT_ASSERTION_FAILED: dev bypass requires BIND_HOST to be a loopback address");
+    }
+    if (env.TRUST_PROXY) {
+      throw new Error("BOOT_ASSERTION_FAILED: dev bypass is incompatible with TRUST_PROXY");
+    }
+  }
+  return appEnv;
+}
+```
+
+### 4.2 Dev routes are not in the production artifact
+
+Two entrypoints, with the dev module imported only by the dev one. The bundler never sees it in the production build.
+
+```typescript
+// main.prod.ts   (the only entrypoint the production image runs)
+import { assertSafeBootConfig } from "./boot";
+import { buildRouter } from "./router";            // contains NO dev login/seed routes
+assertSafeBootConfig(process.env);
+startServer(buildRouter());
+
+// main.dev.ts    (never copied into the production image)
+import { assertSafeBootConfig } from "./boot";
+import { buildRouter } from "./router";
+import { devRoutes } from "./dev/routes";           // /api/dev/login, /api/test/seed ...
+if (assertSafeBootConfig(process.env) === "production") throw new Error("main.dev.ts refused in production");
+startServer(buildRouter({ extra: devRoutes() }));
+```
+
+CI asserts the production bundle contains no string from `dev/` (e.g. `/api/dev/login`).
+
+### 4.3 Request-time check uses the socket, not headers (Rust)
 
 ```rust
+use std::net::SocketAddr;
+
+/// `peer` is the TCP peer of the accepted connection; `local` is the address it arrived on.
+/// Both come from the socket, never from a request header.
+/// Only callable when boot already proved: APP_ENV==development, loopback bind, no trusted proxy.
+pub fn dev_bypass_permitted(peer: SocketAddr, local: SocketAddr) -> bool {
+    peer.ip().is_loopback() && local.ip().is_loopback()
+}
+
+/// Cosmetic only (log lines, redirects). NEVER an authorization decision: the Host header is client-chosen.
 pub fn is_exact_loopback_host(host_header_or_authority: &str) -> bool {
     let trimmed = host_header_or_authority.trim().to_ascii_lowercase();
-    // Strip optional `:port` for IPv4/localhost while preserving bracketed IPv6 `[::1]:8080`:
+    if trimmed == "::1" {
+        return true; // bare IPv6 literal without brackets or port
+    }
     let host_only = if let Some(rest) = trimmed.strip_prefix('[') {
         match rest.split_once(']') {
             Some((ipv6, _port)) => ipv6,
@@ -117,40 +217,68 @@ pub fn is_exact_loopback_host(host_header_or_authority: &str) -> bool {
     } else {
         trimmed.split(':').next().unwrap_or("")
     };
-
     matches!(host_only, "127.0.0.1" | "localhost" | "::1")
 }
 ```
 
+### 4.4 Secrets parse with no defaults
+
+Parse env through a strict schema (`zod`, `envalid`, a Rust config struct) with **no `.default()` on cryptographic keys**. A missing secret is a boot failure, not a fallback.
+
 ---
 
-## 4. How to Discover It Automatically
+## 5. Residual Edge Cases (why the hardened version is still not enough)
 
-### A. Static Code Search
+- **A secret that passes the heuristic can still be weak.** `distinctChars` and length are floors, not entropy. Generate secrets (`openssl rand -base64 48`) and reject anything that was not generated.
+- **Sidecar/tunnel agents on the same host** (including a local tunnel started later by a developer) make a loopback bind reachable remotely. Dev mode refuses `TRUST_PROXY`, but a tunnel agent does not set it. Keep dev bypass off for anything that can be reached through a tunnel; prefer a signed local-only dev token over a bypass flag.
+- **`APP_ENV=test` in CI deploy previews** is "non-production" by this rule. Treat any internet-reachable preview as production for this check: set `APP_ENV=production` there and use real identity.
+- **Containers:** binding `0.0.0.0` inside a container is normal. Dev bypass in containers is therefore unsafe even with a "loopback" peer check, because port-mapping makes remote peers appear as the gateway. Do not enable dev bypass in containers.
+- **Forgotten `.git`/`.env`/source maps** in the static root remain a separate, direct leak (ASVS `13.4.1`).
+- **Config interactions** (`TRUST_PROXY` + a client-IP allowlist, an enforce flag + a monitor-only flag) need their own pairwise assertions; see [`../../2-discovery-and-attacker-methods/attack-surface-and-config-interaction-audit.md`](../../2-discovery-and-attacker-methods/attack-surface-and-config-interaction-audit.md).
+
+---
+
+## 6. How to Discover It Automatically
+
+### A. Static
 ```bash
-# 1. Search for substring host checks (`startsWith("127.0.0.1")`, `includes("localhost")`):
+# 1. Substring host checks (startsWith/includes/indexOf on 127.0.0.1 / localhost):
 rg -n '(startsWith|includes|indexOf)\s*\(\s*["\x27](127\.0\.0\.1|localhost)' src/
 
-# 2. Search for fallback secrets (`SECRET ||`, `SECRET ??`):
+# 2. Fallback secrets (SECRET || / SECRET ??):
 rg -n 'SECRET\s*(\|\||\?\?)' src/
 
-# 3. Search for any `DEV_` or `BYPASS` environment variable reads:
+# 3. Any DEV_ / BYPASS / SKIP_AUTH / MOCK_AUTH variable reads:
 rg -n 'DEV_|BYPASS|SKIP_AUTH|MOCK_AUTH' src/
+
+# 4. Authorization decisions that read Host-derived values:
+rg -n -C 3 'headers\.get\(["\x27](host|x-forwarded-host)["\x27]\)' src/
 ```
 
-### B. Dynamic Attacker Test (Host-Header Spoofing & Boot Config Fault Injection)
-1. **Loopback Host Spoofing Test:** Against the running server, send requests with:
-   - `Host: 127.0.0.1.attacker.example`
-   - `Host: localhost.attacker.example`
-   - `Host: sub.localhost`
-   - `X-Forwarded-Host: 127.0.0.1`
-   Assert that zero dev-bypass branches activate and all unauthenticated requests return `401`.
-2. **Boot Fault-Injection Unit Test:** Invoke `assertSafeBootConfig` in unit tests with `(APP_ENV="production", DEV_BYPASS_EMAIL="admin@x.com")` and with a non-loopback URL `https://app.example.com` + `DEV_BYPASS_EMAIL="admin@x.com"`. Assert both throw `BOOT_ASSERTION_FAILED`.
-3. **Dotfile Exposure Probe (`ASVS v5.0.0-13.4.1`):** Request `GET /.git/HEAD`, `GET /.git/config`, `GET /.env`, `GET /.env.production`, and `GET /sourcemaps/index.js.map`. Assert `404` across all routes.
+```yaml
+rules:
+  - id: authz-decision-from-host-header
+    languages: [typescript]
+    severity: ERROR
+    message: Host / X-Forwarded-Host / req.url hostname must never gate authentication or dev paths.
+    pattern-either:
+      - pattern: if ($X.hostname.$M(...)) { ... }
+      - pattern: if (isExactLoopbackHost($REQ.url)) { ... }
+```
+
+### B. Dynamic
+1. **Host spoofing:** send `Host: 127.0.0.1.attacker.example`, `Host: localhost`, `Host: sub.localhost`, `X-Forwarded-Host: 127.0.0.1`. Zero dev branches activate; unauthenticated requests return `401`.
+2. **Boot fault injection (unit tests):** call `assertSafeBootConfig` with `(APP_ENV unset, DEV_BYPASS_EMAIL set)`, `(APP_ENV="prod", DEV_BYPASS_EMAIL set)`, `(APP_ENV="development", DEV_BYPASS_EMAIL set, BIND_HOST="0.0.0.0")`, `(APP_ENV="development", DEV_BYPASS_EMAIL set, TRUST_PROXY="1")`, and a placeholder secret. All must throw.
+3. **Same-host proxy test:** run the production build behind a local reverse proxy; assert dev routes return `404` and bypass stays off.
+4. **Bundle scan:** grep the production artifact for dev route strings.
+5. **Dotfile probe (`v5.0.0-13.4.1`):** `GET /.git/HEAD`, `/.git/config`, `/.env`, `/.env.production`, `/sourcemaps/index.js.map` all return `404`.
 
 ---
 
-## 5. How to Eliminate the Bug Class by Construction
+## 7. How to Eliminate the Bug Class by Construction
 
-1. **Strip Dev Routes at Build Time or Guard with Both `APP_ENV === "development"` AND `isExactLoopbackHost`:** Never rely on a single flag. Even if `DEV_BYPASS_EMAIL` is set, refuse to honor it unless **both** `APP_ENV === "development"` and `isExactLoopbackHost(req.url)` are true, and throw at boot if `DEV_BYPASS_EMAIL` is present on any non-loopback host.
-2. **Zero Fallback Defaults for Secrets:** Parse all environment variables through a strict boot schema (`zod` / `envalid` / Rust config struct) with **no `.default()`** on cryptographic keys.
+1. **Default-deny environment resolution.** Only the exact strings `development` and `test` relax anything. Everything else is production.
+2. **Dev code does not ship.** Separate entrypoints and a bundle scan; no runtime flag decides whether dev routes exist.
+3. **Socket and bind address are the only locality signals.** Headers never are.
+4. **No fallback defaults on secrets,** enforced by a boot schema.
+5. **Boot takes no request.** `assertSafeBootConfig(env)` returns the resolved environment, and nothing else re-derives it.

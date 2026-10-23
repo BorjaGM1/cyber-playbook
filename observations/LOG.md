@@ -4,6 +4,28 @@ Empirical findings, benchmark measurements, supply-chain post-mortems, and archi
 
 ---
 
+## 2026-10-24 (Internal Hardening Pass: Adversarial Critique of the Playbook's Own Samples and Methods)
+
+### 1. Critique Outcomes — Defects Found in "Hardened" Samples and Verification Methods
+- **Source:** Internal adversarial review of this repository (no external benchmark involved; every item below was found by reading the repository's own code samples and methods, and each was fixed in the same pass).
+- **Findings (sample defects):**
+  - **Quota insert not atomic:** the `INSERT … SELECT … WHERE (SELECT COUNT(*) …) < max` pattern is not safe under PostgreSQL `READ COMMITTED` (two concurrent transactions both read the count before either commits); a counter row updated with `UPDATE … WHERE used < max` is required. A SQLite lab hides this entirely.
+  - **Credit-spend ledger:** a data-modifying CTE executes regardless of whether the main statement matches a row, so an insufficient-balance call left a phantom `reserved` ledger row and burned the idempotency key; duplicate keys threw instead of returning the original result.
+  - **Webhook handler:** event `type` was never checked, and the event ID was recorded even when the order update matched nothing (out-of-order events permanently lost).
+  - **`updateIssue`:** checked only the target project, not the issue's current project or the actor's role (a guest could edit and move any issue in the tenant); the "only auth middleware can construct `TenantScope`" claim was false in TypeScript.
+  - **Rate-limit gate:** rejected requests still consumed the shared global budget (a single abusive client could exhaust it for everyone).
+  - **`safeExternalFetch`:** validated DNS and then let `fetch()` resolve again (DNS rebinding remained possible; pinning existed only as a comment).
+  - **Boot assertion / loopback check:** `isProd` depended on `APP_ENV` being set (the failure it was meant to catch) and the loopback check trusted the attacker-controlled `Host` header.
+  - **Surface dispatcher:** gated on a case-sensitive `Bearer ` prefix while the authenticator accepted other spellings (the header-versus-payload mismatch ASR Pass 2 warns about).
+- **Findings (verification-method defects):**
+  - The `Kani` example proved a *copy* of the decision logic whose guest-grant boolean was not tied to the resource's project; the `Alloy` assertion restated a conjunct of the predicate and was never run against the vulnerable predicate.
+  - The `shuttle` example tested a `Mutex` defined in the test rather than the production type; the race harness could not parse chunked responses and ignored pool-size/engine fidelity.
+  - The differential oracle never computed the subset property it described and compared status only; the canary scanner matched only a verbatim `flag{…}`.
+  - The "zero-knowledge" canary lab kept the database, seed script, registry and validator on the attacker's filesystem, so a white-box agent could read flags directly or forge a validator pass; parallel agents shared one lab and `/tmp`.
+  - No threat model existed for the auditor itself (untrusted repository build scripts and prompt injection).
+- **Playbook integration:** New and rewritten notes — [`strategy/scoped-db.md`](../strategy/scoped-db.md); [`2-discovery-and-attacker-methods/deterministic-oracle-sweep.md`](../2-discovery-and-attacker-methods/deterministic-oracle-sweep.md) (Step 1.5: SQL query-log tenant-predicate oracle, schema-introspection test, guard-mutation self-test, residual list); the isolated lab, differential, race, stateful, formal-verification, surface-mapping, ASR and micro-agent notes in `2-discovery-and-attacker-methods/`; and `baselines/pre-deploy-security-pipeline.md`, which extends the Trail of Bits Three-Arm Proof (entry 1 of the 2026-10-23 section below) with **Arm 4 (variant PoVs)**, mandatory DB snapshot restore between arms, a deterministic golden-traffic diff ahead of LLM regression hunting, and a required structural fix plus permanent regression test. New Part 1 case notes cover async scope propagation, caches and derived data, Next.js/edge specifics, account lifecycle and federation, the browser boundary, and agentic/MCP threats.
+- **Lesson:** Code samples in a security playbook are claims. Every "hardened" block should be exercised in CI against a vulnerable twin (positive control), and every verification harness should be shown to fail on a known-bad variant before its "pass" is trusted.
+
 ## 2026-10-23 (Baseline: 2024–2026 Offensive/Defensive AI Research & Production Engineering Lessons)
 
 ### 0. Dual-Model Cyber Orchestration (`GLM-5.3` + `DeepSeek V4.1 Flash 1017`), Artificial Analysis Cyber Index & `Harness²` (2026-10-23)

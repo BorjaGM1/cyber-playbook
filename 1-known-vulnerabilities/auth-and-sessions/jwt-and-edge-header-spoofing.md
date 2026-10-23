@@ -1,37 +1,41 @@
 # JWT & Edge Identity Header Spoofing
 
-## 1. Invariant Violated & Mechanism
-
-- **Invariant Violated:** `I1 — Authentic Identity & Purpose Binding` (OWASP ASVS `v5.0.0-9.1.1`, `9.1.2`, `9.1.3`, `9.2.1`).
-- **Mechanism:** Applications deployed behind an identity-aware reverse proxy or edge network (e.g., Cloudflare Access, AWS ALB OIDC, Envoy, Tailscale/ Pomerium) often receive both a convenience plain-text header (such as `Cf-Access-Authenticated-User-Email`, `X-Forwarded-User`, or `X-User-Id`) and a cryptographically signed JWT (`Cf-Access-Jwt-Assertion` or `CF_Authorization` cookie). When application code trusts the plain-text header without verifying the JWT signature—or verifies the JWT without pinning the algorithm (`alg`), issuer (`iss`), audience (`aud`), and key source—an attacker can impersonate any user by sending a single forged header or a token signed for a different service/tenant.
-- **Why Happy-Path Tests Miss It:** E2E tests either mock the auth header in local development or pass a valid edge token. They rarely send a forged `Cf-Access-Authenticated-User-Email: ceo@company.com` header with **no** JWT assertion, or a valid JWT issued for a staging/sister application (`aud` mismatch) against production.
+> **Invariant:** `I1 — Authentic Identity & Purpose Binding` (OWASP ASVS `v5.0.0-9.1.1`, `9.1.2`, `9.1.3`, `9.2.1`).
+> Related: [`nextjs-and-edge-specifics.md`](nextjs-and-edge-specifics.md) · [`../infra-and-supply-chain/surface-separation-and-destructive-gates.md`](../infra-and-supply-chain/surface-separation-and-destructive-gates.md) · [`../../2-discovery-and-attacker-methods/deterministic-oracle-sweep.md`](../../2-discovery-and-attacker-methods/deterministic-oracle-sweep.md)
 
 ---
 
-## 2. Where It Hides
+## 1. Attack Transcript
 
-- Edge Worker or Node/Rust middleware that reads `req.headers.get("cf-access-authenticated-user-email")` or `x-forwarded-email` as a fallback when no session cookie is present.
-- Multi-service architectures sharing one Identity Provider (IdP) or JWKS endpoint where `aud` (Audience) is not validated, allowing a token issued for a low-privilege preview app to authenticate against the core production API.
-- JWT verifiers that read the `alg` or `jku`/`x5u`/`kid` header dynamically before verifying the signature:
-  - Accepting `alg: "none"`.
-  - Allowing `HS256` signed with the server's public RSA/ECDSA key (`RS256` $\to$ `HS256` key-confusion attack).
-  - Using an unvalidated `kid` parameter in a file path or SQL query, or fetching keys from an attacker-controlled `jku` URL.
-- Origins reachable directly by IP or default platform hostname (`*.workers.dev`, `*.vercel.app`, `*.onrender.com`, `*.fly.dev`) that bypass the edge proxy entirely.
+The app sits behind an identity-aware proxy. The proxy adds `Cf-Access-Authenticated-User-Email` after authenticating. The attacker reaches the origin directly (the platform hostname) and sets the header themselves.
+
+```http
+GET /api/admin/users HTTP/1.1
+Host: my-service.example-workers.dev
+Cf-Access-Authenticated-User-Email: ceo@company.com
+
+HTTP/1.1 200 OK
+[{"id":"u_1","email":"ceo@company.com","role":"owner"}, ...]
+```
+
+Variant: a JWT legitimately issued for a sister application (staging, preview) is replayed against production because `aud` is never checked.
+
+```http
+GET /api/me HTTP/1.1
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...   (aud = "preview-app", valid signature, same IdP)
+
+HTTP/1.1 200 OK
+{"email":"alice@company.com","role":"owner"}
+```
 
 ---
 
-## 3. Vulnerable vs. Hardened Pattern
+## 2. Spot the Bug
 
-### Vulnerable Pattern (TypeScript — Edge/API Middleware)
+Two fatal problems and several quieter ones.
 
 ```typescript
-// VULNERABLE:
-// 1. Trusts plain-text edge header without verifying the cryptographic JWT.
-// 2. Decodes JWT payload via atob/base64 before signature verification.
-// 3. Does not enforce algorithm allowlist, issuer, or audience (`aud`).
-export async function resolveUserVulnerable(req: Request, env: Env): Promise<string | null> {
-  // Fatal flaw 1: Any caller who hits the worker/origin directly or on an unprotected
-  // route can spoof this header.
+export async function resolveUser(req: Request, env: Env): Promise<string | null> {
   const edgeEmail = req.headers.get("cf-access-authenticated-user-email");
   if (edgeEmail) {
     return edgeEmail.toLowerCase();
@@ -40,82 +44,96 @@ export async function resolveUserVulnerable(req: Request, env: Env): Promise<str
   const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
   if (!token) return null;
 
-  // Fatal flaw 2: Decoding payload without verifying signature or `aud`/`iss`/`exp`.
   const [, payloadB64] = token.split(".");
   const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
   return payload.email ?? null;
 }
 ```
 
-### Hardened Pattern (TypeScript — Fail-Closed JWT Verification with `jose`)
+---
+
+## 3. Invariant Violated & Mechanism
+
+Applications behind an identity-aware proxy (Cloudflare Access, AWS ALB OIDC, Envoy, Tailscale/Pomerium) receive both a convenience plain-text header (`Cf-Access-Authenticated-User-Email`, `X-Forwarded-User`, `X-User-Id`) and a signed JWT (`Cf-Access-Jwt-Assertion` or the `CF_Authorization` cookie). Trusting the plain header, or verifying the JWT without pinning `alg`, `iss`, `aud` and the key source, lets one forged header or one token minted for another service impersonate anyone.
+
+Why happy-path tests pass: E2E tests either mock the header locally or send a real edge token. Nobody sends a forged header with no JWT, or a valid JWT for a sister app.
+
+Where it hides:
+- middleware that reads `cf-access-authenticated-user-email` / `x-forwarded-email` as a fallback when no cookie exists;
+- multi-service setups sharing one IdP or JWKS where `aud` is unchecked;
+- verifiers that read `alg`, `jku`, `x5u` or `kid` before verifying the signature (accepting `alg: none`, `RS256 -> HS256` key confusion, `kid` in a path or SQL, attacker-hosted `jku`);
+- origins reachable directly by default platform hostname (`*.workers.dev`, `*.vercel.app`, `*.onrender.com`, `*.fly.dev`) or IP, bypassing the proxy entirely;
+- **edge-vs-origin path differentials** (section 5): the proxy's policy and the origin's router disagree on what path a request is for.
+
+---
+
+## 4. Hardened Pattern
+
+### TypeScript: fail-closed JWT verification with `jose`
 
 ```typescript
-import { createRemoteJWKSet, jwtVerify, JWTPayload } from "jose";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 export interface VerifiedEdgePrincipal {
   readonly sub: string;
   readonly email: string;
 }
 
-// Cache the remote JWKS fetcher with a strict timeout and cooldown.
 let jwksCache: ReturnType<typeof createRemoteJWKSet> | null = null;
-
 function getJwks(certsUrl: string) {
   if (!jwksCache) {
-    jwksCache = createRemoteJWKSet(new URL(certsUrl), {
-      timeoutDuration: 3000,
-      cooldownDuration: 30000,
-    });
+    jwksCache = createRemoteJWKSet(new URL(certsUrl), { timeoutDuration: 3000, cooldownDuration: 30000 });
   }
   return jwksCache;
+}
+
+/** Minimal cookie reader: exact name match, first occurrence wins, no decoding surprises. */
+export function extractCookie(cookieHeader: string | null, name: string): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) {
+      const value = part.slice(idx + 1).trim();
+      return value.length > 0 ? value : null;
+    }
+  }
+  return null;
 }
 
 export async function verifyEdgeAccessJwt(
   req: Request,
   env: { ACCESS_TEAM_DOMAIN: string; ACCESS_POLICY_AUD: string }
 ): Promise<VerifiedEdgePrincipal | null> {
-  // 1. Fail closed if the server itself is missing its audience or issuer config.
   if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_POLICY_AUD) {
     throw new Error("CRITICAL: Missing ACCESS_TEAM_DOMAIN or ACCESS_POLICY_AUD");
   }
 
-  // 2. Read ONLY the cryptographic assertion header or __Host- / CF_Authorization cookie.
-  //    NEVER read Cf-Access-Authenticated-User-Email or X-Forwarded-User as proof.
+  // Read ONLY the cryptographic assertion. Never treat the plain identity headers as proof.
   const assertion =
     req.headers.get("cf-access-jwt-assertion") ??
     extractCookie(req.headers.get("cookie"), "CF_Authorization");
-
   if (!assertion) return null;
 
   const issuer = `https://${env.ACCESS_TEAM_DOMAIN}`;
-  const certsUrl = `${issuer}/cdn-cgi/access/certs`;
-
   try {
-    // 3. Enforce signature, explicit asymmetric algorithm allowlist, issuer,
-    //    pinned audience (`aud`), expiration (`exp`), and not-before (`nbf`).
-    const { payload } = await jwtVerify(assertion, getJwks(certsUrl), {
+    const { payload } = await jwtVerify(assertion, getJwks(`${issuer}/cdn-cgi/access/certs`), {
       algorithms: ["RS256", "ES256"],
       issuer,
       audience: env.ACCESS_POLICY_AUD,
       clockTolerance: "30s",
     });
-
     if (typeof payload.email !== "string" || !payload.email.includes("@") || typeof payload.sub !== "string") {
-      return null;
+      return null; // service tokens carry no email: route them through the machine-key tier instead
     }
-
-    return Object.freeze({
-      sub: payload.sub,
-      email: payload.email.trim().toLowerCase(),
-    });
+    return Object.freeze({ sub: payload.sub, email: payload.email.trim().toLowerCase() });
   } catch {
-    // Any signature, exp, nbf, iss, or aud mismatch fails closed.
     return null;
   }
 }
 ```
 
-### Hardened Pattern (Rust — Explicit Header & Claim Verification)
+### Rust: explicit header and claim verification
 
 ```rust
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
@@ -139,18 +157,15 @@ pub fn verify_access_jwt(
 ) -> Result<AccessClaims, &'static str> {
     let header = decode_header(raw_token).map_err(|_| "invalid_jwt_header")?;
 
-    // 1. Strict algorithm allowlist — reject HS256, none, etc.
     match header.alg {
         Algorithm::RS256 | Algorithm::ES256 => {}
         _ => return Err("disallowed_jwt_algorithm"),
     }
 
-    // 2. Match `kid` strictly against pre-fetched trusted JWKS (never use `kid` in SQL/paths).
     let kid = header.kid.as_deref().ok_or("missing_kid")?;
     let jwk = jwk_set.find(kid).ok_or("unknown_kid")?;
     let decoding_key = DecodingKey::from_jwk(jwk).map_err(|_| "invalid_jwk")?;
 
-    // 3. Validate signature, exp, nbf, iss, and aud.
     let mut validation = Validation::new(header.alg);
     validation.validate_exp = true;
     validation.validate_nbf = true;
@@ -167,42 +182,85 @@ pub fn verify_access_jwt(
 }
 ```
 
+### Canonical-path guard (edge vs origin)
+
+Reject any request whose path is not already in canonical form *before* routing, so the edge policy, the router and the authorization layer all see the same string.
+
+```typescript
+const NON_CANONICAL = /(%2e|%2f|%5c|%00|%25|;|\\)/i;
+
+export function assertCanonicalPath(url: URL): void {
+  const p = url.pathname;
+  if (NON_CANONICAL.test(p) || p.includes("//") || /\/\.{1,2}(\/|$)/.test(p)) {
+    throw new Response(JSON.stringify({ error: "Not Found" }), {
+      status: 404,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  }
+}
+```
+
 ---
 
-## 4. How to Discover It Automatically
+## 5. Residual Edge Cases (why the hardened version is still not enough)
 
-### A. Static Code Search (AST / Ripgrep)
-Run these checks across the repository to locate unverified header reads or weak JWT calls:
+- **Edge-vs-origin path differentials.** An Access policy covering `/admin/*` is bypassed if the origin treats `/admin/..;/x`, `//admin/x`, `/ADMIN/x`, `/admin%2fx` or `/admin/./x` as the admin route while the edge sees a different path. The JWT check at the origin saves you only if the origin verifies the assertion on every route. Never let the edge's path policy be the *only* thing between a path and a handler; authorize in the app, using the same normalized path as the router. Also compare `Host` handling: trailing dots (`example.com.`), mixed case and `X-Forwarded-Host` overrides.
+- **`aud` is per application, not per IdP.** A shared `aud` across preview, staging and production recreates the sister-app replay.
+- **Direct origin access.** Disable the default platform hostname (`workers_dev = false`) or firewall the origin to the proxy; keep verifying the JWT anyway.
+- **JWKS fetch failure** must fail closed, with cache keyed per issuer, never a fallback to unsigned headers.
+- **Service tokens** have no `email` claim; map them to a machine tier explicitly ([`api-key-lifecycle-and-privilege-escalation.md`](api-key-lifecycle-and-privilege-escalation.md)) instead of loosening the human check.
+- **Framework-level skips.** Some frameworks have had headers that skip middleware entirely; see [`nextjs-and-edge-specifics.md`](nextjs-and-edge-specifics.md).
 
+---
+
+## 6. How to Discover It Automatically
+
+### A. Static (AST / ripgrep)
 ```bash
-# 1. Flag direct reads of plain-text proxy identity headers:
+# 1. Direct reads of plain-text proxy identity headers:
 rg -n -i 'cf-access-authenticated-user-email|x-forwarded-user|x-forwarded-email|x-authenticated-user|x-user-id' src/
 
-# 2. Flag unsafe jwt.decode() calls that skip signature verification:
+# 2. Unsafe jwt.decode() calls that skip signature verification:
 rg -n 'jwt\.decode\(|decodeJwt\(' src/
 
-# 3. Verify every jwtVerify / jsonwebtoken::Validation call sets `algorithms`, `issuer`, and `audience`:
+# 3. Every jwtVerify / jsonwebtoken::Validation call sets algorithms, issuer and audience:
 rg -n -C 8 'jwtVerify|Validation::new' src/
 ```
 
-### B. Dynamic Attacker Harness (The 8-Case Token Spoofing Matrix)
-Against every authenticated endpoint on the local target, fire the following 8 requests and assert that **all 8 return `401 Unauthorized`** (and never leak data or return `200`):
+```yaml
+rules:
+  - id: jwtverify-missing-pins
+    languages: [typescript]
+    severity: ERROR
+    message: jwtVerify must pin algorithms, issuer and audience.
+    patterns:
+      - pattern: jwtVerify($T, $K, $OPTS)
+      - pattern-not: jwtVerify($T, $K, { ..., algorithms: $A, ..., issuer: $I, ..., audience: $U, ... })
+```
 
-| Case | Request Mutation | Expected |
+### B. Dynamic: the 8-case token spoofing matrix (+ path cases)
+Against every authenticated endpoint on the local target, **all must return `401`** (or `404` for the path cases) and never leak data:
+
+| Case | Request mutation | Expected |
 |------|------------------|----------|
-| `T1` | Plain header `Cf-Access-Authenticated-User-Email: admin@target.tld` + **no** JWT header/cookie | `401` |
+| `T1` | Plain header `Cf-Access-Authenticated-User-Email: admin@target.tld` + **no** JWT | `401` |
 | `T2` | Plain header `X-Forwarded-User: admin@target.tld` + **no** JWT | `401` |
-| `T3` | Valid JWT structure with header `{"alg":"none","typ":"JWT"}` and empty signature `header.payload.` | `401` |
-| `T4` | Valid JWT signed by trusted key, but `aud` set to `"https://other-app.example.com"` | `401` |
-| `T5` | Valid JWT signed by trusted key, but `iss` set to `"https://evil-idp.example.com"` | `401` |
-| `T6` | Valid JWT signed by trusted key, but `exp` set to `now - 120s` | `401` |
-| `T7` | Valid JWT signed by trusted key, but `nbf` set to `now + 3600s` | `401` |
-| `T8` | Valid JWT with last byte of signature flipped (`signature[last] ^= 0x01`) | `401` |
+| `T3` | JWT header `{"alg":"none","typ":"JWT"}`, empty signature `header.payload.` | `401` |
+| `T4` | Valid JWT from a trusted key, `aud` = `"https://other-app.example.com"` | `401` |
+| `T5` | Valid JWT from a trusted key, `iss` = `"https://evil-idp.example.com"` | `401` |
+| `T6` | Valid JWT, `exp` = `now - 120s` | `401` |
+| `T7` | Valid JWT, `nbf` = `now + 3600s` | `401` |
+| `T8` | Valid JWT with last signature byte flipped (`sig[last] ^= 0x01`) | `401` |
+| `P1` | Protected path with `//`, `/./`, `;x`, `%2e%2e`, `%2f`, upper-case variants | `404`, not a handler response |
+| `P2` | Request to the platform hostname / bare IP bypassing the proxy | connection refused or `401` |
+
+These are emitted by [`../../2-discovery-and-attacker-methods/deterministic-oracle-sweep.md`](../../2-discovery-and-attacker-methods/deterministic-oracle-sweep.md).
 
 ---
 
-## 5. How to Eliminate the Bug Class by Construction
+## 7. How to Eliminate the Bug Class by Construction
 
-1. **Private Constructor on `AuthenticatedActor`:** Export the `AuthenticatedActor` type from a single module (`src/server/auth/actor.ts` or `src/auth.rs`) with a private symbol/field so route handlers cannot construct one manually from request headers.
-2. **Ban Identity Header Reads Outside Auth Verifier:** Add a CI lint rule (see [`../../baselines/pre-deploy-security-pipeline.md`](../../baselines/pre-deploy-security-pipeline.md)) that fails the build if `cf-access-authenticated-user-email` or `x-forwarded-user` appears anywhere in the codebase.
-3. **Lock Down Origin Bypass:** Configure origin servers (Workers `workers_dev = false`, firewall IP/mTLS rules on VPS/containers) so requests cannot bypass the edge proxy, and still verify the edge JWT inside the application process on every request.
+1. **Private constructor on `AuthenticatedActor`:** export it from a single module (`src/server/auth/actor.ts` / `src/auth.rs`) so handlers cannot build one from request headers.
+2. **Ban identity-header reads outside the verifier:** a CI lint fails if `cf-access-authenticated-user-email` or `x-forwarded-user` appears anywhere else (see [`../../baselines/pre-deploy-security-pipeline.md`](../../baselines/pre-deploy-security-pipeline.md)).
+3. **Lock down origin bypass:** `workers_dev = false`, firewall/mTLS to the proxy, and still verify the edge JWT in-process on every request.
+4. **Canonical path in, canonical path out:** call `assertCanonicalPath` before routing and authorize by the router's matched route, not a re-parsed string.

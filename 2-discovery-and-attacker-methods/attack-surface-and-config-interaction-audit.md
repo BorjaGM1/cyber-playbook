@@ -75,6 +75,7 @@ A critical engineering lesson from Anthropic's ASR architecture is **context iso
    - Optional webhook receivers, legacy API versions (`/api/v1/*`), or experimental file-format parsers (e.g., XML/SVG/archive unpackers, experimental auth providers).
 2. **Check the ASR Invariant:** *If a deployment does not explicitly configure Feature $X$, can an external request still reach Feature $X$'s parser or handler?*
 3. **Verify:** Place an early guard at the router/dispatcher boundary (`if (!config.enableFeatureX) return notFound()`) and verify via dynamic call tracing and the existing test suite that default behavior is 100% preserved.
+4. **Breaking-change note for applications (not just libraries):** In the Anthropic study the targets were network daemons and libraries, where "default configuration" is a well-defined artifact that most deployments inherit. For a deployed web application there is no shared default: the *production configuration* is the default. Turning an on-by-default feature into opt-in changes live behavior for real users, so (a) classify every Pass 1 gate as **breaking** (a route or capability users rely on) or **non-breaking** (dead code, debug/test routes, unused parsers); (b) apply non-breaking gates immediately; (c) ship breaking gates behind an explicit deprecation/opt-in plan with traffic evidence (access logs showing the route is unused); and (d) never claim "100% of tests pass unchanged" as proof of safety—the test suite rarely covers a legacy route, which is exactly why it is attack surface. Use the runtime-vs-static route diff ([`surface-and-sink-mapping.md`](surface-and-sink-mapping.md), Section 4) to find the mounted-but-undocumented candidates first.
 
 ### Pass 2: Early / Pre-Gate Reachability Audit (The `OpenSSH 10.6` Rule)
 For every route, WebSocket handler, webhook receiver, and token verifier, trace the exact chronological order of operations on untrusted input before the hard gate (`Authentication`, `TenantScope`, `HMAC Verification`, `Rate-Limit Lease`) completes:
@@ -138,7 +139,37 @@ export async function handleSignedEnvelopeHardened(
 
 ### Pass 3: Configuration Interaction & Silent Control Degradation Audit
 1. **Extract all security-relevant configuration flags and environment variables** (auth mode, proxy trust, CORS origins, rate limiting, TLS/mTLS, IP/hostname allowlists, cookie flags, webhook verification).
-2. **Test pairwise interactions ($C_i \times C_j$) for silent degradation:**
+2. **Prune before you pair.** Enumerating all $C_i \times C_j$ is infeasible (Anthropic's study covered 17,000+ options, 3,842 of them security-relevant; the 3,842 security-relevant options alone give about 7 million unordered pairs). Use the flag graph (Table E in [`surface-and-sink-mapping.md`](surface-and-sink-mapping.md)):
+   - Keep only **security-relevant** flags (those whose read sites sit inside an authentication, authorization, tenancy, CORS, cookie, rate-limit, proxy-trust, TLS, allowlist or webhook-verification code path).
+   - Build a **guards-read-flags** relation: for each security guard, collect every flag that appears in the guard's *condition* (not just the flag that enables it). Candidate pairs are exactly `(flag that enables guard G, any other flag read in G's condition or in code that G's inputs flow through)`—tens of pairs, not millions.
+   - Add pairs where two flags can set the same underlying value (global vs per-route, long vs short alias). Those are precedence-shadowing candidates.
+   - For each candidate pair, **execute** it: boot the lab with the pair set in the dangerous combination and run the relevant oracle slice ([`deterministic-oracle-sweep.md`](deterministic-oracle-sweep.md)); a combination that turns a previously failing forged request into a `200` is a deterministic finding.
+3. **Test pairwise interactions for silent degradation (over the pruned set):**
    - **Rule Depends on Disabled Resolver:** Does an access-control rule (e.g., hostname deny-list, geo-IP block, or `X-Forwarded-For` IP check) depend on another setting (`reverse_dns`, `trust_proxy`, edge header injection) that can be turned off, causing the rule to evaluate against `null` or a raw IP and **fail open**?
    - **Alias / Precedence Shadowing:** If a setting can be configured in two places (e.g., global config vs. per-route config, or `AUTH_REQUIRED` vs. `PUBLIC_MODE`), which one wins? Does a permissive shorthand override a strict security flag without warning?
-3. **Fix by Failing Closed at Boot:** Add pairwise conflict assertions to `assertSafeBootConfig()` (see [`../1-known-vulnerabilities/infra-and-supply-chain/dev-bypasses-and-boot-assertions.md`](../1-known-vulnerabilities/infra-and-supply-chain/dev-bypasses-and-boot-assertions.md)) so any configuration combination that weakens a security control immediately aborts startup with an explicit error message.
+4. **Fix by Failing Closed at Boot:** Add pairwise conflict assertions to `assertSafeBootConfig()` (see [`../1-known-vulnerabilities/infra-and-supply-chain/dev-bypasses-and-boot-assertions.md`](../1-known-vulnerabilities/infra-and-supply-chain/dev-bypasses-and-boot-assertions.md)) so any configuration combination that weakens a security control immediately aborts startup with an explicit error message.
+
+---
+
+## 5. Web-Application Adaptation: What "Pre-Auth Surface" Means for a Deployed App
+
+The Anthropic study targeted daemons and libraries; the same three questions apply to a web application, but the inventory differs. Enumerate every item below from the runtime route dump ([`surface-and-sink-mapping.md`](surface-and-sink-mapping.md)) and, for each, ask *"what complex code runs before the hard gate, and is it needed in the default deployment?"*
+
+| Pre-auth surface in a web app | What runs before authentication | Typical gate (Pass 2 hoisting) |
+|-------------------------------|----------------------------------|--------------------------------|
+| Unauthenticated routes (landing, health, status, docs) | Handlers, template rendering | Remove unused; no data access |
+| Body parsers mounted globally | JSON/multipart/zip/XML parsing of attacker bytes | Parse after auth; byte ceilings before parse |
+| File upload and image/PDF processing (`sharp`, `ImageMagick`, headless browser) | Decoders, renderers | Authenticate and quota first; sandbox the decoder |
+| Markdown / rich-text rendering of public content | Parsers, sanitizers | Allowlist sanitizer; no raw HTML |
+| OAuth/OIDC callbacks, magic-link and password-reset endpoints | State/nonce handling, email sends, user lookups | Rate limit; constant-shape responses; no enumeration |
+| Email/SMS senders reachable by anonymous callers | Third-party API spend | Pre-call atomic budget ([`../1-known-vulnerabilities/state-and-economics/public-compute-and-denial-of-wallet.md`](../1-known-vulnerabilities/state-and-economics/public-compute-and-denial-of-wallet.md)) |
+| Public share links and embeds | Token lookup, data rendering | Unguessable tokens, expiry, revocation, scoped projection |
+| Webhook receivers | Body read, HMAC, JSON parse, event dispatch | Raw-body HMAC and timestamp **before** parse; dedupe |
+| WebSocket / SSE upgrade endpoints | Handshake, subscription setup | Origin check and auth in the upgrade handler ([`../1-known-vulnerabilities/injection-and-trust-boundaries/browser-boundary.md`](../1-known-vulnerabilities/injection-and-trust-boundaries/browser-boundary.md)) |
+| Debug, metrics, profiling, OpenAPI/Swagger, GraphQL introspection/playground | Introspection, stack traces, heap data | Disable by default; boot-assert in production |
+| Source maps, build artifacts, `.git`, `.env` | Static file serving | Not deployed; 404 |
+| Framework internals (`/_next/data`, `/_next/image`, RSC endpoints, middleware matchers) | Image fetch/transform, data routes outside matcher | Match all data/route variants; allowlist remote image hosts ([`../1-known-vulnerabilities/auth-and-sessions/nextjs-and-edge-specifics.md`](../1-known-vulnerabilities/auth-and-sessions/nextjs-and-edge-specifics.md)) |
+| Legacy API versions (`/api/v1/*`) and compatibility shims | Old handlers without new guards | Remove or place behind the same gate |
+| Edge path-normalization differences | Edge ACL evaluates a different path than the origin | Normalize once; verify edge JWT in the origin |
+
+Record each as an ASR lead with: surface, current gate, proposed gate, breaking/non-breaking classification (Pass 1, item 4), and the oracle that will prove the gate holds.
