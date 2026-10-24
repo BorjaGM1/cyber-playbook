@@ -86,6 +86,36 @@ Here is what the 2025–2026 empirical data proves:
 - **Recursive Harness Optimization (`google-research/harness2`, October 2026):**
   - Rather than hand-tuning prompt rules when subagents suffer tunnel vision or duplicate discovery across large note trees, Google Research's open-source [**Harness² (`google-research/harness2`, `arXiv:2610.14224`)**](https://github.com/google-research/harness2) applies **Propose–Probe–Compose** task-level and harnessing-level recursion to optimize an `OpenCode` or `Codex` harness's prompts, skills, memory layout, and cross-agent coordination without ground-truth labels (improving `GLM-5` and `Gemini 3.5 Flash` by up to **+11.5 points on WorkBuddy-Bench** and **+11.8 pp on LAB**). Always run `harness2` inside an OS sandbox (`Firejail` / container), as it has no built-in sandboxing.
 
+### B. Parametrize Models by **Role**, Not by Brand (Environment / Skill Variables)
+
+The dual-model pairing in Section 3A is one instance of a more general pattern. Brand names (and their leaderboard positions) rotate monthly; **roles** do not. Wire your harness and skills to three role variables, pin a concrete checkpoint per role for a given run, and re-measure refusal rate and recall per role (Section 5) whenever you change a pin. The current best public picks are dated **Oct 23–24, 2026** and will drift — the role contract will not.
+
+#### `SWEEP_MODEL` — Scout / Workhorse
+Cheap, fast (`70–100+ tok/s`), `0%` refusals; carries high-volume route/oracle **residual** hunting (Step 1.5 → Step 3) and initial PoCs. Runs as the many parallel subagents.
+- **`DeepSeek V4.1 Flash 1017`** (stock open-weight) — **$0.42/task**, **57%** Artificial Analysis Cyber Index (**#1 openly-available**), **85.7%** on Moonshot `xdev-bench-hard` (reported in the Kimi K3.1 Pro comparison set), **0%** safety refusals, strong agentic coding (DeepSWE ~77%). **Default Scout pick.**
+- **`MiMo-V2.6-Pro`** — **$0.18/task**, **56%** Cyber Index; the cheapest viable Scout.
+- **Do not reach for older `DeepSeek V4 Pro` (`deepseek-v4-pro-0813`, ~$0.66/M input) as the Scout:** `V4.1 Flash 1017` is faster, cheaper, and stronger on agentic coding; a `V4.1 Pro` tier is not released as of this writing; and running a same-family model as both Scout *and* Wall-Breaker shares blind spots (defeating the cross-family Judge rationale below).
+
+#### `WALLBREAKER_MODEL` — Wall-Breaker / Chain Escalator
+A larger, more creative model invoked **only** when the Scout hits a wall before closing a lead, or when a confirmed PoC needs deeper chaining. Interchangeable by family — pick per budget and per the kind of lead:
+- **`Kimi K3.1 Pro`** (Moonshot, released **2026-10-23**; open weights by **Nov 4, 2026**) — best today for **large-repo logic and long-horizon chains**: **1M-token context**, top-ranked open-weight on **Terminal-Bench 4.0 (~65.7%)**. Moonshot deliberately **removed cyber-related data at both mid-training and RL** before the open-weight release, which dropped its internal `xdev-bench-hard` from **90.5% → 81.0%** pass@3 (still well above `GLM-5.3`'s reported 57.1% on that bench); practitioner-cited `ExploitBench` **74.7%** vs `GLM-5.3` **54.4%**, and a far lower hallucination-bench score (**5.4** vs `GLM-5.3` **14.8**). Use it for architecture/logic reasoning rather than raw offensive payloads. Cite: [Kimi K3.1 Pro blog](https://www.kimi.ai/blog/kimi-k3-1-pro), [@ArtificialAnlys](https://x.com/ArtificialAnlys/status/2113688083145314416), [@_gaurav_pathak_](https://x.com/_gaurav_pathak_/status/2113724482636366322), [@cheatyyyy](https://x.com/cheatyyyy/status/2113683629713027473).
+- **`Grok 4.7 (xhigh)`** — **56%** Cyber Index, low refusal, strong general reasoning. Expensive as a Scout, fine as an on-demand Wall-Breaker.
+- **`GLM-5.3` (non-flash — *not* `GLM-5.3-Flash`)** — Zhipu did **not** strip offensive post-training, so it stays more daring on memory-corruption / RCE chains than cyber-cut open weights; its only obstacle is the **turn-1 cold-start refusal** that the Scout's workspace warmup bypasses (mechanism and field reports in Section 3A and the cited `@bedros_p` / `@cheatyyyy` threads).
+- **`Claude Sonnet 5.5` / `GPT-6 Astra`** — best when the "wall" is **patch design, regression-hunt, or business-logic audit**; a defensive white-box framing (Section 4) avoids the Opus-style `[cyber]` session pause.
+
+**Optional dual Wall-Breaker:** nothing forces a single family. Running two — e.g. **`Kimi K3.1 Pro`** for architecture/logic chains **+** **`GLM-5.3`** (or **`Grok 4.7`**) for offensive payload construction — covers both the "what's the chain?" and the "can we actually land it?" failure modes, at the cost of a second on-demand endpoint.
+
+#### `JUDGE_MODEL` — Cross-Model Falsification Gate
+Must be a **different model family** from whatever found/patched the bug (the Two-Pass Cross-Model Judge Gauntlet in [`autonomous-micro-agent-red-teaming.md`](autonomous-micro-agent-red-teaming.md) §2 and the Four-Arm Proof in [`../baselines/pre-deploy-security-pipeline.md`](../baselines/pre-deploy-security-pipeline.md)). If `DeepSeek`/`GLM` found it, judge with `Claude`/`GPT`, and vice versa. This is exactly why the Scout and Wall-Breaker should not both be the same family.
+
+#### Accessing the Roles Without N Vendor Accounts
+You do **not** need a separate account per brand. A single **OpenRouter** or **Fireworks AI** API key behind an **OpenAI-compatible SDK** exposes all of the above as `provider/model` strings, so the three role variables resolve to one client with per-agent model overrides (as `omp` / `oh-my-pi` and `OpenCode` already do). When any role will see **proprietary source**, require an endpoint offering **Zero Data Retention (ZDR)** and read its retention/training terms first (Section 6); Kimi, for example, documents ZDR for API customers.
+
+#### Topology Mapping (Section 3A, Restated by Role)
+- **Topology 1 — `WALLBREAKER_MODEL` as orchestrator + `SWEEP_MODEL` as subagents.** The large model plans and the cheap fast fleet executes recon (`Low`) and PoCs (`High`). This is the `omp` screenshot setup with `GLM-5.3 (high)` orchestrating `DeepSeek V4.1 Flash 1017` workers.
+- **Topology 2 (recommended daily driver) — `SWEEP_MODEL` orchestrator + on-demand `WALLBREAKER_MODEL`.** The Scout runs the sweep and spawns the Wall-Breaker only **at lead-close** (find new pivots or confirm exhaustion) and **at bug-confirm** (chain impact), at ~$0.03–$0.10 per review.
+- **Role-swap when sweeps stagnate.** On diminishing returns, swap which family holds `SWEEP_MODEL` vs `WALLBREAKER_MODEL` to break tunnel vision (Section 3A).
+
 ---
 
 ## 4. Refusal-Free White-Box Framing Patterns (How to Get 0% Refusals on Every Model)

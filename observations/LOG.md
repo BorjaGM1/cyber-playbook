@@ -4,6 +4,22 @@ Empirical findings, benchmark measurements, supply-chain post-mortems, and archi
 
 ---
 
+## 2026-10-24 (Model Landscape: Kimi K3.1 Pro Release, Cyber-Data Cut & Role-Parameterized Model Selection)
+
+### 1. Kimi K3.1 Pro Release and Deliberate Open-Weight Cyber-Capability Cut (2026-10-23)
+- **Sources:** [Kimi K3.1 Pro blog (Moonshot, 2026-10-23)](https://www.kimi.ai/blog/kimi-k3-1-pro); [@ArtificialAnlys (2026-10-23)](https://x.com/ArtificialAnlys/status/2113688083145314416); [@_gaurav_pathak_ (2026-10-23)](https://x.com/_gaurav_pathak_/status/2113724482636366322); [@cheatyyyy (2026-10-23)](https://x.com/cheatyyyy/status/2113683629713027473).
+- **Findings:**
+  - Moonshot released **Kimi K3.1 Pro**, a ~3T-class open-weight model with a **1M-token context window**; it is available via API/apps on launch day with **full open weights by Nov 4, 2026** and documents **Zero Data Retention (ZDR)** for API customers. It is **#1 open-weight on Terminal-Bench 4.0 (~65.7%)** (narrowly behind `Claude Opus 5.5` at 66.4%, ahead of `GPT-6 Astra` at 58.2%).
+  - **Deliberate cyber cut:** Moonshot states it **identified and removed cyber-related data at both the mid-training and RL stages** before the open-weight release. On its in-house `xdev-bench-hard` (expert-curated source-code vuln discovery/exploitation, pass@3), the un-cut checkpoint solved **90.5%** while the shipped K3.1 Pro reaches **81.0%** — still far above `GLM-5.3`'s reported **57.1%** on the same bench. Practitioner-cited deltas: `ExploitBench` **74.7%** (K3.1 Pro) vs **54.4%** (`GLM-5.3`), and a much lower hallucination-bench score (**5.4** vs **14.8**).
+  - **Interpretation for defenders:** K3.1 Pro is strongest as a **Wall-Breaker for large-repo logic and long-horizon chains**, not as a raw offensive-payload generator; its cyber cut is a vendor policy choice (contrast `GLM-5.3`, whose offensive post-training was not stripped and whose only obstacle is a bypassable turn-1 cold-start refusal).
+- **Playbook integration:** Codified in [`2-discovery-and-attacker-methods/models-and-refusal-free-framing.md`](../2-discovery-and-attacker-methods/models-and-refusal-free-framing.md) §3B.
+
+### 2. Role-Parameterized Model Selection (`SWEEP` / `WALLBREAKER` / `JUDGE`)
+- **Finding:** Because checkpoints and leaderboard positions rotate monthly, the playbook now parametrizes models by **role** rather than brand: `SWEEP_MODEL` (cheap/fast/0%-refusal workhorse for residual route hunting and initial PoCs — currently `DeepSeek V4.1 Flash 1017` at $0.42/task or `MiMo-V2.6-Pro` at $0.18/task), `WALLBREAKER_MODEL` (large creative model invoked only at lead-close and bug-confirm — `Kimi K3.1 Pro`, `Grok 4.7 xhigh`, `GLM-5.3` non-flash, or `Claude Sonnet 5.5` / `GPT-6 Astra` for patch/logic work), and `JUDGE_MODEL` (mandatory different family from Finder/Patcher). An **optional dual Wall-Breaker** pairs a logic family (Kimi) with an offensive family (GLM-5.3/Grok).
+- **`DeepSeek V4 Pro` vs `V4.1 Flash 1017` note:** Do not substitute the older `deepseek-v4-pro-0813` (~$0.66/M input) for the Scout role — `V4.1 Flash 1017` is faster, cheaper, and stronger on agentic coding; a `V4.1 Pro` tier is not released; and a same-family Scout+Wall-Breaker shares blind spots, defeating the cross-family Judge.
+- **Access:** One **OpenRouter** or **Fireworks AI** key behind an **OpenAI-compatible SDK** resolves all three role variables to a single client with per-agent model overrides; require **ZDR** endpoints for any role that sees proprietary source.
+- **Playbook integration:** Codified in [`2-discovery-and-attacker-methods/models-and-refusal-free-framing.md`](../2-discovery-and-attacker-methods/models-and-refusal-free-framing.md) §3B; topology mapping restated by role (Topology 1 = Wall-Breaker orchestrator + Scout subagents; Topology 2 = Scout orchestrator + on-demand Wall-Breaker; role-swap on stagnation).
+
 ## 2026-10-24 (Internal Hardening Pass: Adversarial Critique of the Playbook's Own Samples and Methods)
 
 ### 1. Critique Outcomes — Defects Found in "Hardened" Samples and Verification Methods

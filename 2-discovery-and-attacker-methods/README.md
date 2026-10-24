@@ -42,7 +42,7 @@ Missing spec means the correct output is a question to the human (`INTENT_AMBIGU
 | **Step 4** | [`concurrency-and-race-attack-harnesses.md`](concurrency-and-race-attack-harnesses.md) | `I3` | Last-byte (HTTP/1.1) and single-packet (HTTP/2) bursts, real-engine SQL races, multi-instance races, `shuttle` for in-process stores with a positive control |
 | **Step 5** | [`stateful-property-and-fuzzing-harnesses.md`](stateful-property-and-fuzzing-harnesses.md) | `I2`, `I3`, `I4` | Reference-model state machines over every read surface (comments, history, search, export), command alphabet generated from the capability graph, entry-point coverage fuzzing, fuzz-lab construction (`zlib` pattern) |
 | **Step 6** | [`bounded-formal-verification.md`](bounded-formal-verification.md) | `I1`, `I3`, `I4` | `Kani` over the **production** decision function with an independent spec and positive control; `Alloy` check that must refute the vulnerable predicate |
-| **Reference** | [`models-and-refusal-free-framing.md`](models-and-refusal-free-framing.md) | All | 2025–2026 benchmarks, dual-model orchestration topologies, refusal-rate measurement, third-party API data-handling rule |
+| **Reference** | [`models-and-refusal-free-framing.md`](models-and-refusal-free-framing.md) | All | 2025–2026 benchmarks, role-parameterized model selection (`SWEEP`/`WALLBREAKER`/`JUDGE`, §3B), dual-model orchestration topologies, refusal-rate measurement, third-party API data-handling rule |
 
 ---
 
